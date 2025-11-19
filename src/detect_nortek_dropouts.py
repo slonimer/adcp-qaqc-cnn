@@ -43,21 +43,58 @@ def init_model(model_path):
     if "resnet" in filename:
         # Extract variant from filename, e.g., "resnet34" or "resnet50"
         match = re.search(r"resnet(\d+)", filename)
-        variant = match.group(0) if match else "resnet50"
+        resnet_variant = match.group(0) if match else "resnet50"
 
-        print(f"📌 Initializing ResNet model ({variant})")
+        print(f"📌 Initializing ResNet model ({resnet_variant})")
         model = ResNetTemporalClassifier(
             num_classes=num_classes,
             pretrained=False,
-            variant=variant,
+            variant=resnet_variant,
             resize=(224, 224)
         )
+
+        if resnet_variant == 'resnet50':
+            # --- Load pretrained weights manually (offline) ---
+            pretrained_path = f"/lustre10/scratch/slonimer/models/{resnet_variant}.pth"
+            state_dict = torch.load(pretrained_path, map_location='cpu')
+            # Filter out the fc layer weights (1000-class classifier)
+            filtered_state_dict = {k: v for k, v in state_dict.items() if not k.startswith("fc.")}
+            # only load matching keys (to ignore classifier layer mismatches)
+            missing, unexpected = model.backbone.load_state_dict(filtered_state_dict, strict=False)
+            print(f"✅ Loaded pretrained weights with {len(missing)} missing and {len(unexpected)} unexpected keys")
+
+
     else:
         print("📌 Initializing TemporalCNN model")
         model = TemporalCNN(input_channels=3, num_classes=num_classes)
 
     # Load weights
-    model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu') ))
+    #model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu') ))
+
+    # Load the saved model for evaluation
+    print("\n=== Starting Evaluation on Test Set ===")
+    state_dict = torch.load(model_path, map_location=device)
+
+    # Detect if the saved state_dict was from DataParallel
+    #dp_saved = any(k.startswith("module.") for k in state_dict.keys())
+
+    # Clean up keys: remove any "module." prefixes for single-GPU
+    cleaned_state_dict = {}
+    for k, v in state_dict.items():
+        new_k = k
+        while new_k.startswith("module."):
+            new_k = new_k[len("module."):]
+        cleaned_state_dict[new_k] = v
+
+    #Load the cleaned model paramters
+    model.load_state_dict(cleaned_state_dict)
+
+    # Wrap model in DataParallel if using multiple GPUs AND saved weights had 'module.'
+    use_multi_gpu = torch.cuda.device_count() > 1
+    if use_multi_gpu: #and dp_saved:
+        print(f"Using {torch.cuda.device_count()} GPUs")
+        model = torch.nn.DataParallel(model)
+    
     #model.load_state_dict(torch.load(model_path, map_location=device))
     #model.to(device)
     model.eval()
@@ -417,27 +454,29 @@ def run_classify(model_path, mat_path, h5_monthly_folder, h5_24hr_folder, log_pa
 
     ######################################
     #PART 1: Convert monthly Mat to monthly h5
-    print('Converting mat files to h5 format to folder {}'.format(h5_monthly_folder))
-    convert_monthly_mat_to_h5.extract_mat_to_h5(mat_path, h5_monthly_folder) 
+    if h5_monthly_folder is not None:
+        print('Converting mat files to h5 format to folder {}'.format(h5_monthly_folder))
+        convert_monthly_mat_to_h5.extract_mat_to_h5(mat_path, h5_monthly_folder) 
 
     ######################################
     # PART #2: Split to 24 hours, embed annotations and save the time in python format
 
-    annotations_file = '' #This is purely classification. No annotation exists. 
-    #annotations_file = r'F:\Documents\Projects\ML\ADCP_ML\annotations_table_ed05_revised.mat'
+    if mat_path is not None: 
+        annotations_file = '' #This is purely classification. No annotation exists. 
+        #annotations_file = r'F:\Documents\Projects\ML\ADCP_ML\annotations_table_ed05_revised.mat'
 
-    #Paths to month(ish) HDF5 source file(s):
-    filename_mat = os.path.basename(mat_path)
-    filename_h5 = os.path.splitext(filename_mat)[0] + '.h5'
-    input_file = h5_monthly_folder + filename_h5
+        #Paths to month(ish) HDF5 source file(s):
+        filename_mat = os.path.basename(mat_path)
+        filename_h5 = os.path.splitext(filename_mat)[0] + '.h5'
+        input_file = h5_monthly_folder + filename_h5
 
-    print('Splitting monthly files to 24hr to folder {}'.format(h5_24hr_folder))
+        print('Splitting monthly files to 24hr to folder {}'.format(h5_24hr_folder))
 
-    split_h5_to_24hr_files.split_h5_to_24hr_files_with_ann(
-        input_file,             # your big HDF5 source (created with import_monthly_mat_to_h5.py)
-        h5_24hr_folder,          # output dir for 24hr files
-        annotations_file,        # your .mat annotations file
-    )
+        split_h5_to_24hr_files.split_h5_to_24hr_files_with_ann(
+            input_file,             # your big HDF5 source (created with import_monthly_mat_to_h5.py)
+            h5_24hr_folder,          # output dir for 24hr files
+            annotations_file,        # your .mat annotations file
+        )
 
     ######################################
     #PART 3: Plot if any detections are found

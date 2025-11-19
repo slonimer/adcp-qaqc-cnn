@@ -4,7 +4,7 @@ import numpy as np
 import random
 from torch.nn import functional as F
 from sklearn.metrics import f1_score
-import wandb
+#import wandb
 
 # 1. Reproducibility
 def seed_everything(seed=42):
@@ -18,7 +18,8 @@ def get_class_weights(dataset, num_classes):
     from collections import Counter
     label_counts = Counter()
 
-    for _, labels in dataset:
+    #for _, labels in dataset:   #From when just had x,y
+    for _, labels, _ in dataset: #Updated for x,y,meta
         label_counts.update(labels.tolist())
 
     total = sum(label_counts.values())
@@ -184,7 +185,10 @@ def train_model(model, train_loader, val_loader, optimizer, loss_fn, device, num
 
         # Save best model
         if val_f1 > best_f1:
-            torch.save(model.state_dict(), best_model_path)
+            #"unwrap" model if run on parallel GPUs, makes loading easier
+            model_to_save = model.module if isinstance(model, torch.nn.DataParallel) else model
+            torch.save(model_to_save.state_dict(), best_model_path)
+            #torch.save(model.state_dict(), best_model_path)
             best_f1 = val_f1
             patience_counter = 0
             print("✅ New best model saved.")
