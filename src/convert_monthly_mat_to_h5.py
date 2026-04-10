@@ -63,8 +63,22 @@ def save_dict(h5group, d):
                     pass
 
 
-def extract_mat_to_h5(mat_path, output_folder):
-    # 1. Load the .mat file
+def extract_mat_to_h5(mat_path, output_folder, allow_overwrite = 0):
+
+    # 1. If allow_overwrite is 0, check if outputs already exist
+  
+    #Define output path and filename with h5 file extension:
+    filename = os.path.basename(mat_path)
+    output_filename = os.path.splitext(filename)[0] + '.h5'
+    h5_output_path = os.path.join(output_folder, output_filename)
+  
+    # --- Skip if file exists and overwrite not allowed ---
+    if not allow_overwrite and os.path.exists(h5_output_path):
+        print(f"Skipping (already exists): {h5_output_path}")
+        save_status = 'skipped'
+        return save_status
+
+    # 2. Load the .mat file
     mat = scipy.io.loadmat(mat_path, struct_as_record=False, squeeze_me=True)
 
     for key in ['meta', 'data', 'units', 'config']:
@@ -89,13 +103,6 @@ def extract_mat_to_h5(mat_path, output_folder):
     # Create folder if it doesn't exist
     os.makedirs(output_folder, exist_ok=True)
 
-    # Generate new filename with .h5 extension
-    filename = os.path.basename(mat_path)
-    output_filename = os.path.splitext(filename)[0] + '.h5'
-    h5_output_path = os.path.join(output_folder, output_filename)
-    #print(f"Output path: {output_path}")
-    #h5_output_filename = 'organized_data.h5'
-
     with h5py.File(h5_output_path, 'w') as h5f:
         save_dict(h5f.create_group('meta'), meta)
         save_dict(h5f.create_group('data'), data)
@@ -103,3 +110,6 @@ def extract_mat_to_h5(mat_path, output_folder):
         save_dict(h5f.create_group('config'), config)
 
     print("\n✅ Data extracted and saved as organized_data.h5!")
+
+    save_status = 'success'
+    return save_status

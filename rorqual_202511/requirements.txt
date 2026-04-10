@@ -1,0 +1,14 @@
+h5py
+ipython
+ipykernel
+matplotlib
+numpy
+pandas
+scikit_learn
+scipy
+seaborn
+timm
+torch
+torchaudio
+tqdm
+wandb

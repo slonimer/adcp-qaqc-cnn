@@ -1,12 +1,14 @@
+
 import os
 
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from dataset_loader import ADCPDataset  # your custom dataset
-from resnet_temporal import ResNetTemporalClassifier # Resnet Models
-from model import TemporalCNN # CNNClassifier  # Original model
-from utils import seed_everything, get_class_weights, combined_loss, train_model
+from dev.dataset_loader_noEmbed import ADCPDataset  # your custom dataset
+#from dataset_loader import ADCPDataset  # your custom dataset
+from src.resnet_temporal import ResNetTemporalClassifier # Resnet Models
+from src.model import TemporalCNN # CNNClassifier  # Original model
+from src.utils import seed_everything, get_class_weights, combined_loss, train_model
 
 import h5py
 import matplotlib.pyplot as plt
@@ -14,8 +16,13 @@ import matplotlib.dates as mdates
 import numpy as np
 import datetime
 
-import convert_monthly_mat_to_h5
-import split_h5_to_24hr_files
+import src.convert_monthly_mat_to_h5 as convert_monthly_mat_to_h5
+#import split_h5_to_24hr_files
+import dev.split_h5_to_24hr_files_noEmbed as split_h5_to_24hr_files_noEmbed
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from collections import OrderedDict #Use this for ordering batches of multiple files
 
 import re
 
@@ -55,7 +62,10 @@ def init_model(model_path):
 
         if resnet_variant == 'resnet50':
             # --- Load pretrained weights manually (offline) ---
-            pretrained_path = f"/lustre10/scratch/slonimer/models/{resnet_variant}.pth"
+            
+            #pretrained_path = model_path
+            pretrained_path = r"F:\Documents\GitHub\ml_development\ADCP_ML\src\\models\\" + f"{resnet_variant}.pth"
+            #pretrained_path = f"/lustre10/scratch/slonimer/models/{resnet_variant}.pth"
             state_dict = torch.load(pretrained_path, map_location='cpu')
             # Filter out the fc layer weights (1000-class classifier)
             filtered_state_dict = {k: v for k, v in state_dict.items() if not k.startswith("fc.")}
@@ -101,19 +111,27 @@ def init_model(model_path):
     return model 
 
 
-def classify_test_data(model, h5_24hr_file):
+def classify_test_data(model, h5_24hr_file, store_x=False, batch_size=3):
+
+    #Ensure that batch_size is a multiple of 3 (number of beams), since we want to keep the beams together in the batches, and not split them up
+    if batch_size % 3 != 0:
+        raise ValueError("batch_size must be a multiple of 3 (number of beams) to keep beams together in batches")
 
     #Set this up:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     #Create a generic function for classifying files
+    print(f'Loading: {h5_24hr_file}')
     test_file_dataset = ADCPDataset(h5_24hr_file)
-    test_loader = DataLoader(test_file_dataset, batch_size=3, shuffle=False, num_workers=4)
+    #test_loader = DataLoader(test_file_dataset, batch_size=3, shuffle=False, num_workers=4)
+    test_loader = DataLoader(test_file_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
     all_x = []
     all_preds = []
     all_labels = []
     all_meta = []
+
+    n_debug = 0
 
     for x, y, meta in test_loader:
         x = x.to(device)
@@ -128,11 +146,21 @@ def classify_test_data(model, h5_24hr_file):
         #Need to reshape the outputs, and y to match dimensions:
         y = y.view(-1)                        # (B*T, )
 
-        #Append the results
-        all_x.append(x.cpu())
+        #Append x (aka input ADCP data)
+        if store_x:
+            #Only store the input data if specified, since it can take a lot of memory, 
+            # and is only really needed if making plots
+            all_x.append(x.cpu())
+        else:
+            all_x.append(None) #Placeholder if not storing x
+        
+        #Append results
         all_preds.append(preds.cpu())
         all_labels.append(y)
         all_meta.append(meta)
+
+        n_debug += 1
+        print(f"Processed batch {n_debug} with shape {x.shape}, predictions shape {preds.shape}, labels shape {y.shape}")
         
     #return x, y, preds, meta
     return all_x, all_labels, all_preds, all_meta
@@ -194,6 +222,10 @@ def plot_results(x, annotations, predictions, filename, meta, outdir = None) :
     x = x.cpu()
     annotations = annotations.cpu()
     predictions = predictions.cpu()
+
+    # If saving to an output folder, normalize filename to basename only
+    if outdir is not None:
+        filename = os.path.basename(filename)
 
     n_beams = x.shape[0]#[2]
     n_channels = x.shape[1]#[2]
@@ -290,7 +322,9 @@ def plot_results(x, annotations, predictions, filename, meta, outdir = None) :
         if outdir:
             if not os.path.exists(outdir):
                 os.makedirs(outdir)
-            plt.savefig(f"{outdir}\\{filename[:-3]}_beam{beam+1}.png", dpi=300)
+            stem = os.path.splitext(filename)[0]
+            plt.savefig(f"{outdir}\\{stem}_beam{beam+1}.png", dpi=300)
+            #plt.savefig(f"{outdir}\\{filename[:-3]}_beam{beam+1}.png", dpi=300)
         #if show:
         #    plt.show()
         plt.show()
@@ -298,8 +332,12 @@ def plot_results(x, annotations, predictions, filename, meta, outdir = None) :
 
 
 
-def classify_and_plot(model, h5_files, h5_24hr_folder, log_path, create_plots = 1):
+def classify_and_plot(model, h5_files, h5_24hr_folder, log_path, create_plots = 1, batch_size=3):
 
+    #Ensure that batch_size is a multiple of 3 (number of beams), since we want to keep the beams together in the batches, and not split them up
+    if batch_size % 3 != 0:
+        raise ValueError("batch_size must be a multiple of 3 (number of beams) to keep beams together in batches")
+    
     #Define the path for tracking detections:
     #log_path = os.path.join(h5_24hr_folder, "dropout_detections.txt")
 
@@ -307,73 +345,122 @@ def classify_and_plot(model, h5_files, h5_24hr_folder, log_path, create_plots = 
     h5_24hr_files = []
     for h5_file in h5_files:
         h5_24hr_files.append(h5_24hr_folder + h5_file) 
-
+        #print(h5_24hr_folder)
+        #print(h5_file)
+        
     #Run the classification
     print(f'Running drop-out detection on all 24 hr files')
-    x, y, preds, meta = classify_test_data(model, h5_24hr_files)
+    if create_plots == 1:
+       x, y, preds, meta = classify_test_data(model, h5_24hr_files, store_x=True, batch_size=batch_size)
+    else:
+        #If not creating plots, don't store the input data (x), since it can take a lot of memory, and is only really needed for plotting
+        x, y, preds, meta = classify_test_data(model, h5_24hr_files, batch_size=batch_size)
 
     #print('printing shapes of x, and y')
     #print(len(x))
     #print(len(y))
 
-    #Plot results for each 24 hr file
-    for h5_file, x_sample, y_sample, pred_sample, meta_sample in zip(h5_files, x, y, preds, meta):
+    #Output the results for each 24 hr file
+    #for h5_file, x_sample, y_sample, pred_sample, meta_sample in zip(h5_files, x, y, preds, meta):
+
+    #Loop through each batch of outputs:
+    for x_sample, y_sample, pred_sample, meta_sample in zip(x, y, preds, meta):
+        
+        n_in_batch = len(meta_sample["beam_number"]) # actual rows in this batch
+
         #Reorganize the structure of the labels and predictions
-        labels = y_sample.view(3,288) #annotations
-        predictions = pred_sample.view(3,288)
+        labels= y_sample.view(n_in_batch, 288) #annotations
+        predictions = pred_sample.view(n_in_batch, 288)
+        #labels = y_sample.view(3,288) #annotations
+        #predictions = pred_sample.view(3,288)
 
         #DEBUG
         #print(labels.shape)
         #print(predictions.shape)
 
-        #Determine if any predictions present in any beam:
-        do_plot = 0
-        beam_num = []
-        for beam in range(3):
-            #labels_beam = labels[beam].cpu().numpy()
-            pred_beam = predictions[beam].cpu().numpy()
+        #Loop through contents of each batch: (each beam dataset)
+
+        # Group sample indices by filename within this batch
+        file_to_samples = OrderedDict()
+        for sample in range(n_in_batch):
+            filename = meta_sample["filename"][sample]
+            file_to_samples.setdefault(filename, []).append(sample)
+
+        # Process one file at a time within the batch
+        for h5_file, file_samples in file_to_samples.items():
+
+            #Initialize variables to Determine if any predictions present in any beam:
+            do_plot = 0
+            beam_num = []
+
             
-            #Number of predictions per beam, per day
-            n_predictions = np.sum(pred_beam>0)
+            #for sample in range(n_in_batch): #for beam in range(3):
+            for sample in file_samples:
+                #labels_beam = labels[beam].cpu().numpy()
+                pred_sample = predictions[sample].cpu().numpy()
+                
+                #Number of predictions per beam, per day
+                n_predictions = np.sum(pred_sample>0)
 
-            #If more than 5 minutes (1 prediction) in a day, append to text file:
-            # Only proceed if the log file already exists
-            if os.path.exists(log_path) and n_predictions >= 1:
+                beam_number = int(meta_sample["beam_number"][sample].item())
+                time_vec = meta_sample["time"][sample]  # time for this sample
 
-                #Find non-zero predictions (ann=0 indicates this is for predictions, not labels)
-                segments = get_segments(pred_beam, num_classes = 4)
-                #segments = get_segments(pred_beam, ann=0) 
-                for start_idx, end_idx, cls in segments:
-                    start_time = float(meta_sample["time"][0][start_idx])
-                    end_time = float(meta_sample["time"][0][end_idx])
+                #DEBUG
+                #print(f"Filename: {meta_sample['filename'][sample]}")
+                #print(f"sample {sample}: n_predictions {n_predictions}, beam number {beam_number}")  
 
-                    # Convert to datetime if values are Unix timestamps
-                    if isinstance(start_time, (int, float)):
-                        start_time = datetime.datetime.utcfromtimestamp(start_time)
-                        end_time = datetime.datetime.utcfromtimestamp(end_time)
+                #If more than 5 minutes (1 prediction) in a day, append to text file:
+                # Only proceed if the log file already exists
+                if os.path.exists(log_path) and n_predictions >= 1:
 
-                    duration = (end_time - start_time).total_seconds() / 60.0
+                    #Find non-zero predictions (ann=0 indicates this is for predictions, not labels)
+                    segments = get_segments(pred_sample, num_classes = 4)
+                    #segments = get_segments(pred_beam, ann=0) 
+                    for start_idx, end_idx, cls in segments:
+                        start_time = float(time_vec[start_idx])
+                        end_time = float(time_vec[end_idx])
+                        #start_time = float(meta_sample["time"][0][start_idx])
+                        #end_time = float(meta_sample["time"][0][end_idx])
+                        #beam_number = meta_sample["beam_number"]
 
-                    # Append to log
-                    with open(log_path, "a") as f:
-                        f.write(f"{start_time}, {end_time}, {cls}, {beam+1}, {duration:.1f}\n")
+                        # Convert to datetime if values are Unix timestamps
+                        if isinstance(start_time, (int, float)):
+                            start_time = datetime.datetime.utcfromtimestamp(start_time)
+                            end_time = datetime.datetime.utcfromtimestamp(end_time)
 
-            #If more than one hour predicted in a day in any beam, make plots:
-            n_samples_threshold = 12 # 1 hour
-            # print(np.sum(pred_beam>0)) #DEBUG
-            if n_predictions > n_samples_threshold:
-                do_plot = 1
-                beam_num.append(beam)
-        
-        #Either plot the results, or print a message
-        if do_plot == 1 and create_plots==1:
-            #Plot the results - Don't show them, just save a figure
-            plot_results(x_sample, labels, predictions, h5_file, meta_sample, outdir=h5_24hr_folder)
-            #And print a message
-            print(f'Drop-outs found in Beam {beam_num}! In {h5_file}')
-        #else:
+                        duration = (end_time - start_time).total_seconds() / 60.0
+
+                        # Append to log
+                        with open(log_path, "a") as f:
+                            f.write(f"{start_time}, {end_time}, {cls}, {beam_number}, {duration:.1f}\n")
+                            #f.write(f"{start_time}, {end_time}, {cls}, {sample+1}, {duration:.1f}\n")
+
+                #If more than one hour predicted in a day in any beam, make plots:
+                n_samples_threshold = 12 # 1 hour
+                # print(np.sum(pred_beam>0)) #DEBUG
+                if n_predictions > n_samples_threshold:
+                    do_plot = 1
+                    beam_num.append(sample)
+
             #Print a message
-            # print('No drop-outs found in {}'.format(h5_file))
+            print('Diagnostic plots are only produced if more than 1 hour of drop-outs are detected')
+            
+            #Either plot the results, or print a message
+            if do_plot == 1 and create_plots==1 and x_sample is not None:
+                #Plot the results - Don't show them, just save a figure
+                file_x = x_sample[file_samples]
+                file_labels = labels[file_samples]
+                file_predictions = predictions[file_samples]
+
+                file_meta = {
+                    "time": [meta_sample["time"][sample] for sample in file_samples],
+                    "filename": h5_file,
+                    "channels": meta_sample["channels"][0],
+                    "beam_number": [int(meta_sample["beam_number"][sample].item()) for sample in file_samples],
+                }
+
+                plot_results(file_x, file_labels, file_predictions, h5_file, file_meta, outdir=h5_24hr_folder)
+                print(f"Drop-outs found in Beam {beam_num}! In {h5_file}")
 
     '''
     #Run the classification
@@ -411,13 +498,37 @@ def classify_and_plot(model, h5_files, h5_24hr_folder, log_path, create_plots = 
             print('No drop-outs found in {}'.format(h5_file))
     '''
 
+def prepare_24hr_from_mat(mat_path, h5_monthly_folder, h5_24hr_folder):
+    """Convert monthly mat -> monthly h5 -> split into 24hr h5 files."""
+    #STEP 1: Convert monthly mat to monthly h5
+    convert_monthly_mat_to_h5.extract_mat_to_h5(mat_path, h5_monthly_folder)
+    #STEP 2: Split monthly h5 to 24hr h5 files
+    filename_h5 = os.path.splitext(os.path.basename(mat_path))[0] + '.h5'
+    input_file = h5_monthly_folder + filename_h5
+    split_h5_to_24hr_files_noEmbed.split_h5_to_24hr_files(
+        input_file,
+        h5_24hr_folder,
+    )
 
-def run_classify(model_path, mat_path, h5_monthly_folder, h5_24hr_folder, log_path, create_plots = 1):
-    #Inputs: 
-    #model_path = r"F:\Documents\GitHub\ml_development\ADCP_ML\\" + "best_model_20250508.pt"
-    #h5_monthly_folder = r'F:\Documents\Projects\ML\ADCP_ML\BACUS\h5_files\\' # Define output folder -  Monthly h5
-    #h5_24hr_folder = r'F:\Documents\Projects\ML\ADCP_ML\BACUS\h5_24h_files\\'  #Output folder - 24hr h5:
-    #log_path = os.path.join(h5_24hr_folder, "dropout_detections.txt")
+def run_classify(h5_monthly_folder, h5_24hr_folder, mat_path=None, model_path=None, log_path=None, batch_size=None, create_plots = 1):
+    #Required Inputs: 
+    # h5_monthly_folder # Folder for h5 files converted from mat format (input and output)
+    # h5_24hr_folder = #24hr h5 files (input and output)
+    # 
+    #Optional Inputs
+    # mat_path : Path to mat files to convert to h5 format
+    # model_path: Path to a trained model, otherwise will use default
+    # log_path: Path to an existing log file, otherwise will make one
+    # batch_size: Default is 3. Any input options must a multiple of 3
+    #
+    #Examples
+    # h5_monthly_folder = r'F:\Documents\Projects\ML\ADCP_ML\BACUS\h5_files\\' 
+    # h5_24hr_folder = r'F:\Documents\Projects\ML\ADCP_ML\BACUS\h5_24h_files\\'
+    # 
+    # mat_path = [r'F:\Documents\Projects\ADCP\scan_for_data\BACUS\ADCP2MHZ\\20240801\\ADCP_20240801.mat'] 
+    # model_path = r"F:\Documents\GitHub\ml_development\ADCP_ML\src\\models\\" + "best_model_20250508.pt" 
+    # log_path = os.path.join(h5_24hr_folder, "dropout_detections.txt")
+    # batch_size = 6 
 
     '''
     #Optional method for running this code
@@ -444,7 +555,29 @@ def run_classify(model_path, mat_path, h5_monthly_folder, h5_24hr_folder, log_pa
         for mat_path in mat_paths:
             detect_nortek_dropouts.run_classify(model_path, mat_path, h5_monthly_folder, h5_24hr_folder) 
     '''
-    
+    if model_path is None:
+        model_path = r"F:\Documents\GitHub\ml_development\ADCP_ML\src\\models\\" + "best_model_20250508.pt"
+
+    #Ensure that batch_size is a multiple of 3 (number of beams), since we want to keep the beams together in the batches, and not split them up
+    if batch_size is not None and batch_size % 3 != 0:
+        raise ValueError("batch_size must be a multiple of 3 (number of beams) to keep beams together in batches")
+
+
+    #If an output text logfile (for keeping track of detections), is not specified, create one
+    if log_path is None:
+        # Determine model type from filename
+        filename_model = os.path.basename(model_path).lower()
+        if "resnet" in filename_model:
+            # Extract variant from filename, e.g., "resnet34" or "resnet50"
+            match = re.search(r"resnet(\d+)", filename_model)
+            model_variant = match.group(0) if match else "resnet50"
+        else:
+            model_variant = 'CNN'
+
+        log_path = os.path.join(h5_24hr_folder, f"dropout_detections_{model_variant}_{datetime.datetime.now().strftime('%Y%m%dT%H%M')}.txt")
+        with open(log_path, "w") as f:
+            f.write("start_time, end_time, class, beam, duration_minutes\n")
+
     #Initialize the classification model
     model = init_model(model_path)
 
@@ -453,30 +586,41 @@ def run_classify(model_path, mat_path, h5_monthly_folder, h5_24hr_folder, log_pa
     #folder_list = os.listdir(data_parent)
 
     ######################################
-    #PART 1: Convert monthly Mat to monthly h5
-    if h5_monthly_folder is not None:
-        print('Converting mat files to h5 format to folder {}'.format(h5_monthly_folder))
-        convert_monthly_mat_to_h5.extract_mat_to_h5(mat_path, h5_monthly_folder) 
+    #PART 1: Convert monthly Mat to monthly h5, and then to 24hr h5 files
+    # Build full list of .mat files
+    if mat_path:    
+        mat_paths = []
+        for folder in mat_path:
+            file_list = os.listdir(folder)
+            mat_files = {k for k in file_list if os.path.splitext(k)[1] == ".mat"}
+            print(mat_files)
+            for filename in mat_files:
+                mat_paths.append(folder + '\\' + filename)
 
-    ######################################
-    # PART #2: Split to 24 hours, embed annotations and save the time in python format
 
-    if mat_path is not None: 
-        annotations_file = '' #This is purely classification. No annotation exists. 
-        #annotations_file = r'F:\Documents\Projects\ML\ADCP_ML\annotations_table_ed05_revised.mat'
+        # Parallel prep step (I/O-heavy); classify once afterward
+        max_workers = min(4, max(1, len(mat_paths)))
+        if mat_paths:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(prepare_24hr_from_mat, mat_path, h5_monthly_folder, h5_24hr_folder) for mat_path in mat_paths]
+                for future in as_completed(futures):
+                    try:
+                        done_path = future.result()
+                        print(f"Prepared 24hr files from: {os.path.basename(done_path)}")
+                    except Exception as e:
+                        print(f"Failed to prepare one mat file: {e}")
 
-        #Paths to month(ish) HDF5 source file(s):
-        filename_mat = os.path.basename(mat_path)
-        filename_h5 = os.path.splitext(filename_mat)[0] + '.h5'
-        input_file = h5_monthly_folder + filename_h5
 
-        print('Splitting monthly files to 24hr to folder {}'.format(h5_24hr_folder))
-
-        split_h5_to_24hr_files.split_h5_to_24hr_files_with_ann(
-            input_file,             # your big HDF5 source (created with import_monthly_mat_to_h5.py)
-            h5_24hr_folder,          # output dir for 24hr files
-            annotations_file,        # your .mat annotations file
-        )
+        #split_h5_to_24hr_files_noEmbed.split_h5_to_24hr_files(
+        #    input_file,             # your big HDF5 source (created with import_monthly_mat_to_h5.py)
+        #    h5_24hr_folder,          # output dir for 24hr files
+        #)
+        
+        #split_h5_to_24hr_files.split_h5_to_24hr_files_with_ann(
+        #    input_file,             # your big HDF5 source (created with import_monthly_mat_to_h5.py)
+        #    h5_24hr_folder,          # output dir for 24hr files
+        #    annotations_file,        # your .mat annotations file
+        #)
 
     ######################################
     #PART 3: Plot if any detections are found
@@ -486,7 +630,21 @@ def run_classify(model_path, mat_path, h5_monthly_folder, h5_24hr_folder, log_pa
     h5_files = sorted(k for k in file_list if os.path.splitext(k)[1] == ".h5")
     #print(h5_files)
 
-    classify_and_plot(model, h5_files, h5_24hr_folder, log_path, create_plots)
-    
+    if batch_size is None:
+        classify_and_plot(model, h5_files, h5_24hr_folder, log_path, create_plots)
+    else:
+        classify_and_plot(model, h5_files, h5_24hr_folder, log_path, create_plots, batch_size=batch_size)
 
+    ######################################
+    #PART 4: Delete the temporary h5 files
+    for h5_folder in {h5_monthly_folder, h5_24hr_folder}:
+        file_list = os.listdir(h5_folder)
+        h5_files = sorted(k for k in file_list if k.endswith(".h5"))
+        for h5_file in h5_files:
+            full_path = os.path.join(h5_folder, h5_file)
+            try:
+                os.remove(full_path)
+                print(f"Deleted {h5_file}")
+            except Exception as e:
+                print(f"Failed to delete {h5_file}: {e}")
     

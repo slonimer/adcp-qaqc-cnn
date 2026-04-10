@@ -161,6 +161,11 @@ def train_model(model, train_loader, val_loader, optimizer, loss_fn, device, num
                 val_preds.append(preds.cpu())
                 val_targets.append(y_val.cpu())
 
+                #val_f1 below is not changing, lets see what it looks like for each batch...
+                debug_f1 = f1_score(y_val.cpu(), preds, average='macro')
+                print('Val Loss (& total) on Batch: {} ({}) | Val F1 on batch: {}'.format(loss, val_loss, debug_f1))
+                
+
         #Calculate average loss
         val_loss /= len(val_loader.dataset) # Total loss for this batch - Needed when using small number of examples, and last batch size might not match
         #val_loss /= len(val_loader)

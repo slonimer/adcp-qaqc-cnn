@@ -1,0 +1,6 @@
+I've copied the most recent changes over to the notebooks/ and src/ folders.  
+
+I'm just keeping these files here for reference (outputs are still intact), but should avoid using these!  Instead, do further development on the files in the tracked src/ and notebooks/ folders
+
+
+
