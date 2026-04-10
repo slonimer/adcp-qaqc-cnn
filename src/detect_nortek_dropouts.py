@@ -4,7 +4,7 @@ import os
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from dev.dataset_loader_noEmbed import ADCPDataset  # your custom dataset
+from src.dataset_loader_noEmbed import ADCPDataset  # your custom dataset
 #from dataset_loader import ADCPDataset  # your custom dataset
 from src.resnet_temporal import ResNetTemporalClassifier # Resnet Models
 from src.model import TemporalCNN # CNNClassifier  # Original model

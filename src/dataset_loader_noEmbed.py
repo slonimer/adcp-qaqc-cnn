@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
-import parse_annotations
+import src.parse_annotations as parse_annotations
 import h5py
 import numpy as np
 import os

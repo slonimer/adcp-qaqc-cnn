@@ -1,9 +1,7 @@
-import h5py
 import numpy as np
 import scipy.io
 from datetime import datetime, timezone
 from dateutil import parser as dateparse
-import os
 
 #Note: This used to exist within "split_h5_to_24hr_files.py" but was moved into it's own function when created "split_h5_to_24hr_files_noEmbed.m"
 
@@ -121,6 +119,8 @@ def subset_annotations(time, annotations):
         
 
 
+'''
+I think this is deprecated, but don't want to delete until after testing code to be sure it all works
 
 def parse_annotations(self, annotations_group):
     annotations = []
@@ -153,3 +153,4 @@ def parse_annotations(self, annotations_group):
             })
             
     return annotations
+'''
