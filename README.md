@@ -53,14 +53,19 @@ notebooks/ADCP_Anomaly_Training_resnet.ipynb: Builds on ADCP_Anomaly_Training.ip
 notebooks/ADCP_Anomaly_Training_DRAC_resnet.ipynb: Nearly identical to code above, but for using GPU resources 
 
 
-Next Steps:
+2026-04:
 
-These functions have been created to seperate the annotation handling and file splitting from "split_h5_to_24hr_files.py" into distinct files
+Created several new files to seperate the annotation handling and file splitting so that annotations are NOT embedded in the h5 formatted files.  This will make training easier, but making it simpler to adjust the annotations without needing to re-extract / re-generate every training h5 file each time.  
 
-dev/split_h5_to_24hr_files_noEmbed.py
-dev/parse_annotations.py
-dev/split_monthly_mat_to_24hour_h5_noEmbed.ipynb
-dev/dataset_loader_noEmbed.py
+src/split_h5_to_24hr_files_noEmbed.py: New code to split mat formatted to hourly h5 files, without embedding annotations
+src/parse_annotations.py: New code to parse annotations 
+src/dataset_load_noEmbed.py: New dataset loader that uses parse_annotations to annotate the h5 files, on the fly
+
+notebooks/split_monthly_mat_to_24hour_h5_noEmbed.ipynb: Example code for running the file splitting
+notebooks/ADCP_Anomaly_Detection.ipynb: Has an example to show how to run the detection model on new monthly mat files
+
+
+
 
 
  
