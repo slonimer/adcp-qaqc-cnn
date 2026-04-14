@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 from src.dataset_loader_noEmbed import ADCPDataset  # your custom dataset
-#from dataset_loader import ADCPDataset  # your custom dataset
+#from src.dataset_loader import ADCPDataset  # your custom dataset
 from src.resnet_temporal import ResNetTemporalClassifier # Resnet Models
 from src.model import TemporalCNN # CNNClassifier  # Original model
 from src.utils import seed_everything, get_class_weights, combined_loss, train_model
@@ -17,8 +17,8 @@ import numpy as np
 import datetime
 
 import src.convert_monthly_mat_to_h5 as convert_monthly_mat_to_h5
-#import split_h5_to_24hr_files
-import dev.split_h5_to_24hr_files_noEmbed as split_h5_to_24hr_files_noEmbed
+#import src.split_h5_to_24hr_files as split_h5_to_24hr_files
+import src.split_h5_to_24hr_files_noEmbed as split_h5_to_24hr_files_noEmbed
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
